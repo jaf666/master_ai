@@ -1,0 +1,345 @@
+---
+title: "Ejercicio de feedback - Feature engineering y clasificaciones"
+author: "Juan Manuel"
+date: today
+date-format: long
+execute:
+  echo: true
+  warning: false
+  error: false
+  eval: true
+  include: true
+format:
+  html:
+    self-contained: true
+    theme: default
+    lang: es-ES
+---
+
+# Caso práctico sobre *people analytics*
+
+Para la realización de la tarea utilizaremos el conjunto de datos `attrition`. Estos datos se pueden cargar directamente desde el paquete `modeldata` de R.
+
+Descripción de la base de datos: abandono de empresa por parte de empleados, originalmente proporcionada por IBM Watson Analytics Lab (`help("attrition", package = "modeldata")`).
+
+-   objetivo: utilizar las características del empleado/a para predecir si abandonará la compañía (*attrition*).
+-   tipo de problema: clasificación binomial supervisada
+-   variable respuesta: Attrition (i.e., "Yes", "No")
+-   features: 30 variables
+-   número de observaciones: 1470
+-   acceso: disponible en el paquete `modeldata`.
+
+# Feature engineering (4 puntos)
+
+## Ejercicio 1
+
+Carga la base de datos en R con el comando `data(attrition, package = "modeldata")`. Recuerda asimismo cargar los paquetes que vayas a utilizar para la resolución de los problemas: `tidyverse`, `tidymodels`, `modeldata`, `skimr` y `themis`.
+
+```{r}
+#| label: datos y paquetes
+
+# Cargar librerías necesarias
+library(pacman)
+
+p_load(
+  tidyverse, # Easily Install and Load the 'Tidyverse'
+  tidymodels, # Easily Install and Load the 'Tidymodels' Packages
+  modeldata, # Data Sets Useful for Modeling Examples
+  skimr, # Compact and Flexible Summaries of Data
+  themis,
+  kknn,
+  kernlab
+)
+
+# Carga de datos
+data(attrition, package = "modeldata")
+
+```
+
+Lleva a cabo un análisis exploratorio de los datos utilizando alguno de los paquetes de R especializados en este tipo de análisis, como por ejemplo `skimr`.
+
+```{r}
+#| label: EDA
+
+# análisis exploratorio de los datos
+
+skimr::skim(attrition)
+
+
+```
+
+## Ejercicio 2
+
+Establece una semilla fija con la función `set.seed(123456)`.
+
+La variable `Attrition` es un factor con niveles `No` y `Yes`. En este caso, el evento de interés es el abandono del empleado, es decir, el nivel `Yes`. Sin embargo, R por defecto toma como referencia el primer nivel por orden alfabético, que en este caso es `No`. Por lo tanto, asegúrate de que el nivel `Yes` (el evento de interés) es el primer nivel del factor.
+
+Divide la base de datos en conjuntos de training (70%) y test (30%), utilizando el factor `Attrition (No/Yes)` como variable de estratificación.
+
+Comprueba que la prevalencia (%) de abandono (`Attrition = Yes`) es prácticamente la misma en los tres conjuntos (original, entrenamiento y test).
+
+```{r}
+#| label: split
+
+# Establezco una semilla
+set.seed(123456)
+
+# Establezco el valor de orden por defecto de FALSE a TRUE
+attrition <- attrition %>%
+  mutate(Attrition = forcats::fct_relevel(Attrition, "Yes"))
+
+# Compruebo que efectivamente se ha cambiado
+levels(attrition$Attrition)
+
+# división de los datos
+
+# Divido el conjunto de datos
+split <- initial_split(attrition, prop = 0.7, strata = "Attrition")
+split
+
+# comprobación de prevalencias
+
+# Almaceno ambos conjuntos en variables
+attrition_train <- training(split)
+attrition_test <- testing(split)
+
+# Calculo la prevalencia de ambos conjuntos para asegurarme de que es prácticamente
+# la misma en ambos
+print(paste(
+  "Prevalencias: ORIGINAL =", mean(attrition$Attrition == "Yes") * 100, "% |",
+  "TRAIN =", mean(attrition_train$Attrition == "Yes") * 100, "% |",
+  "TEST =", mean(attrition_test$Attrition == "Yes") * 100, "%"
+))
+
+```
+
+## Ejercicio 3
+
+Construye un objeto `recipe` de `tidymodels` que utilice los datos de entrenamiento con las siguientes características:
+
+1.  Una fórmula con variable dependiente `Attrition` y todas las variables predictoras como features.
+
+2.  Elimina aquellas variables que tengan varianza nula o variabilidad casi nula.
+
+3.  Si hubiera algún dato faltante (*missing value*), realiza una imputación utilizando la mediana para todas las variables numéricas (utiliza `all_numeric_predictors()`).
+
+4.  Realiza una agrupación de niveles que no alcancen un mínimo de frecuencia de un 1% en todas los features que sean factores nominales.
+
+5.  Realiza una codificación con dummies de todas las variables nominales, eliminando una de los grupos que se establece como referencia (`one_hot = FALSE`); elimina de nuevo las variables con varianza nula o casi nula tras la creación de dummies.
+
+6.  Realiza una estandarización de todas las variables numéricas.
+
+7.  Elimina las variables altamente correlacionadas (umbral de correlación absoluta > 0.9).
+
+8.  Debido al fuerte desbalance entre los casos "Yes" y "No" en la variable `Attrition`, incorpora `themis::step_smote(Attrition, over_ratio = 0.6`) en la receta para aumentar de forma sintética las observaciones de la clase minoritaria durante el entrenamiento. De este modo se evita que el modelo quede sesgado hacia la clase mayoritaria y se mejora su capacidad para detectar empleados con riesgo de abandonar la empresa.
+
+```{r}
+#| label: receta procesado
+
+# construcción de la receta
+
+# Construyo un objeto recipe de tidymodels
+at_recipe <- recipe(Attrition ~ ., data = attrition_train) %>%
+  # Elimino aquellas variables que tengan una varianza nula o variabilidad casi nula
+  step_nzv(all_predictors()) %>%
+
+  # Imputo la mediana a aquellos valores faltantes
+  step_impute_median(all_numeric_predictors()) %>%
+
+  # Agrupo en niveles que no alcancen un mínimo de frecuencia de un 1% en todas los
+  # features o sean factores nominales
+  step_other(all_nominal_predictors(), threshold = 0.01) %>%
+
+  # Realizo codificación con dummies de todas las variables nominales, eliminando
+  # una de los grupos que se establece como referencia
+  step_dummy(all_nominal_predictors(), one_hot = FALSE) %>%
+
+  # Elimino de nuevo variables con varianza nula o casi nula
+  step_nzv(all_predictors()) %>%
+
+  # Estandarización de las variables numéricas
+  step_normalize(all_numeric_predictors()) %>%
+
+  # Elimino las variables altamente correlacionadas
+  step_corr(threshold = 0.9) %>%
+  
+  # Aumento de forma sintética las observaciones de la clase minoritaria durante
+  # el entrenamiento para evitar que el modelo quede sesgado hacia la clase mayoritaria.
+  themis::step_smote(Attrition, over_ratio = 0.6)
+
+print(at_recipe)
+
+```
+
+# Clasificación mediante kNN (3 puntos)
+
+A partir de la receta de preprocesado construida en el paso anterior, se pide:
+
+## Ejercicio 4
+
+1.  Definir un modelo de clasificación KNN utilizando el paquete `tidymodels`, dejando el número de vecinos `k` como hiperparámetro a ajustar.
+
+2.  Construir un procedimiento de validación cruzada **v-fold** con `v=10`, estratificando por la variable respuesta `Attrition`.
+
+3.  Definir una rejilla de valores para `k` (por ejemplo, 10 valores entre 3 y 50) y realizar una búsqueda del mejor valor de `k` usando la validación cruzada anterior.
+
+4.  Usar como métrica principal ROC AUC y seleccionar el valor óptimo de *k* según esta métrica.
+
+5.  Una vez elegido el mejor *k*, entrenar el modelo KNN final con todos los datos de entrenamiento y evaluar sobre el conjunto de test.
+
+    -   Mostrar la matriz de confusión.
+    -   Mostrar la curva ROC.
+    -   Calcular al menos Accuracy, Sensibilidad (recall de la clase "Yes") y Especificidad.
+    -   Comentar los resultados obtenidos brevemente.
+
+```{r}
+#| label: knn
+
+# ESPECIFICACIÓN DEL MODELO KNN
+
+# Defino el modelo de clasificación KNN dejando el parámetro K a ajustar
+knn_spec <- nearest_neighbor(
+  mode = "classification",
+  neighbors = tune()
+) %>%
+  set_engine("kknn")
+
+# DEFINICIÓN DEL WORKFLOW
+
+knn_wf <- workflow() %>%
+  add_recipe(at_recipe) %>%
+  add_model(knn_spec)
+
+# VALIDACIÓN CRUZADA Y REJILLA DE HIPERPARÁMETROS
+
+# Construyo un procedimiento de validación cruzada v-fold con v=10
+cv_folds <- rsample::vfold_cv(attrition_train, # data used to create resamples (only the training set)
+                              v = 10, # 10-fold cross-validation (split into 10 roughly equal folds)
+                              strata = Attrition) # stratify by the outcome to preserve class balance in each fold
+
+# Defino una rejilla para valores de k
+k_grid <- grid_regular(neighbors(range = c(3, 50)), levels = 10)
+
+metrics_set <- yardstick::metric_set(roc_auc,
+                                     accuracy,
+                                     sens,
+                                     spec)
+
+# TUNING DE HIPERPARÁMETROS
+knn_tuned <- tune_grid(
+  knn_wf,
+  resamples = cv_folds,
+  grid = k_grid,
+  metrics = metrics_set,
+  control = control_grid(save_pred = TRUE)
+)
+# RESULTADOS DEL TUNING
+
+show_best(knn_tuned, metric = "roc_auc")
+
+collect_metrics(knn_tuned) %>%
+  arrange(.metric, desc(mean)) %>%
+  print(n = 20)
+
+autoplot(knn_tuned) + 
+  ggtitle("k-NN performance across k (10x5 CV)")
+
+# SELECCIONAR MEJOR MODELO
+
+best_k <- select_best(knn_tuned, 
+                        metric = "roc_auc")
+print(best_k)
+
+# FINALIZAR WORKFLOW
+final_knn_wf <- finalize_workflow(knn_wf, best_k)
+
+# AJUSTAR MODELO FINAL
+final_fit <- last_fit(final_knn_wf, split)
+test_preds <- collect_predictions(final_fit)
+
+# EVALUACIÓN EN DATOS DE PRUEBA
+
+# Muestro la matriz de confusión
+conf_mat(test_preds, truth = Attrition, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title = "Matriz de confusión - KNN")
+
+# Muestro la curva ROC  
+test_preds %>%
+  roc_curve(truth = Attrition, .pred_Yes) %>%
+  autoplot() +
+  labs(title = "Curva ROC - KNN")
+
+# Calculo accuracy, sensibilidad, especificidad
+my_final_metrics <- metric_set(accuracy, sens, spec)
+
+test_preds %>%
+  my_final_metrics(truth = Attrition, estimate = .pred_class)
+
+```
+
+# Clasificación mediante SVM (3 puntos)
+
+A partir de la receta de preprocesado definida en los pasos anteriores, se pide:
+
+## Ejercicio 5
+
+1.  Definir un modelo de clasificación **SVM** utilizando el ecosistema `tidymodels` y emplear un SVM **no lineal polinómico** mediante la función `svm_poly()` del paquete `parsnip`.
+
+2.  Fijar los hiperparámetros del SVM de esta forma: `cost = 1`, `degree = 2`, `scale_factor = 1`.
+
+3.  Crear el flujo de trabajo (`workflow`) que combine la receta de preprocesado y el modelo SVM y ajustar el modelo SVM con los datos de entrenamiento.
+
+4.  Realizar una predicción sobre el conjunto de test y evaluar el rendimiento del modelo SVM con los siguientes indicadores:
+
+    -   Matriz de confusión
+    -   Accuracy
+    -   Sensibilidad (recall de `Attrition = "Yes"`)
+    -   Especificidad
+
+```{r}
+#| label: svm
+
+# ESPECIFICACIÓN DEL MODELO SVM POLINÓMICO
+svm_spec <- parsnip::svm_poly(
+  mode = "classification",
+  cost = 1,
+  degree = 2,
+  scale_factor = 1
+) %>%
+  set_engine("kernlab")
+# WORKFLOW
+
+svm_wf <- workflow() %>%
+  add_recipe(at_recipe) %>%
+  add_model(svm_spec)
+
+# ENTRENAMIENTO
+final_svm_fit <- last_fit(svm_wf, split)
+
+# PREDICCIONES EN TEST
+svm_test_preds <- collect_predictions(final_svm_fit)
+# MÉTRICAS Y MATRIZ DE CONFUSIÓN
+
+conf_mat(svm_test_preds, truth = Attrition, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(title = "Matriz de confusión - SVM")
+
+svm_metrics <- metric_set(accuracy, sens, spec)
+
+svm_test_preds %>%
+  svm_metrics(truth = Attrition, estimate = .pred_class)
+
+```
+
+5.  Comparar brevemente el rendimiento del SVM con el modelo KNN entrenado en el ejercicio anterior. ¿Cuál de los dos obtiene mejores resultados? Razonar la respuesta.
+
+
+Con KNN, el valor de K optimizado fue k = 50 basándose en la métrica ROC AUC (0.724), lo que indica que el modelo necesita un gran número de vecinos para tomar una decisión fiable, lo cual refleja que las razones por la que los empleados se van o se quedan no se encuentran en una frontera nítida.
+
+Viendo la matriz de confusión, se puede intuír que la técnica SMOTE ha sido efectiva al mejorar la detección de la clase minoritaria, alcanzando una sensibilidad del 75%, lo cual es un resultado positivo para una estrategia de retención de talento. A pesar de esto, el modelo generó 129 falsos positivos, por lo que la empresa tendrá que invervenir sobre estos empleados que no querían irse.
+
+Por otra parte, SVM ha obtenido un accuracy del 80.3%, lo cual puede parecer un resultado sorprendente, pero se debe
+a que el modelo (configurado con parámetros fijos) se comportó de forma conservadora, prediciendo casi siempre "No", de forma que al acertar estos valores subió mucho la media global. Además, la sensibilidad está en 37.5%, por lo que de los 72 empleados que realmente se fueron, SVM solo detectó a 27, escapándosele 45, lo cual no es asumible. Por lo tanto, aunque SVM es matemáticamente más preciso a nivel global, falla en el objetivo principal, que es detectar los abandonos, y lo hace con una fuga enorme.
+
+Por lo tanto, el modelo ganador es KNN, ya que minimiza el riesgo de fuga no detectada al intervenir sobre 3 de cada 4 empleados en riesgo, mientras que SVM deja escapar a la mayoría sin ser detectados.

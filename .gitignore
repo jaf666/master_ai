@@ -1,0 +1,37 @@
+# Directorios de entornos virtuales
+venv/
+.venv/
+env/
+
+# Archivos generados por Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Directorios de Pytest
+.pytest_cache/
+
+# Archivos de Jupyter/IPython
+.ipynb_checkpoints
+*~
+
+# PDF files
+*.pdf
+
+# LaTeX
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.RHistory

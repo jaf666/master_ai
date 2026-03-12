@@ -1,0 +1,262 @@
+---
+title: "Ejercicio de feedback - Programación y entorno de trabajo para la IA"
+author: "Juan Manuel"
+date: today
+date-format: long
+execute:
+  echo: true
+  warning: false
+  error: false
+  eval: true
+  include: true
+format:
+  html:
+    self-contained: true
+    theme: default
+    lang: es-ES
+    include-in-header:
+      text: |
+        <style>
+        body {
+          text-align: justify;
+        }
+        </style>
+---
+
+### Carga y Limpieza de Datos
+
+A continuación, se cargaron los conjuntos de datos y se juntaron en un solo dataframe a partir de la variable común "código".
+
+```{r}
+
+# Cargo librerías necesarias
+library(pacman)
+
+p_load(
+  tidyverse, # Easily Install and Load the 'Tidyverse'
+  tidymodels, # Easily Install and Load the 'Tidymodels' Packages
+  modeldata, # Data Sets Useful for Modeling Examples
+  skimr, # Compact and Flexible Summaries of Data
+  readxl,
+  janitor, # Simple Tools for Examining and Cleaning Dirty Data
+)
+
+# Carga de datos
+path <- "datos entregable.xlsx"
+df_demo <- read_xlsx(path = path, sheet = "demográficos")
+df_bio <- read_xlsx(path = path, sheet = "biomarcadores")
+
+
+```
+
+### Limpieza de los encabezados y eliminación de registros incompletos
+
+Se limpiaron los nombres de los encabezados para que sea más fácil trabajar con ellos, además, se eliminaron los registros de aquellas mujeres que no tuvieran información de laboratorio.
+
+```{r}
+
+# Limpio antes de unir porque "codigo" en una hoja empieza con mayúscula y 
+# en otra con minúscula. Así ya hago join directamente y no usando una lista
+df_demo <- df_demo %>%
+  clean_names()
+df_bio <- df_bio %>%
+  clean_names()
+
+# Unión por ID (En este caso "codigo")
+df <- inner_join(df_demo, df_bio, by = "codigo")
+
+# Elimino los registros de aquellas mujeres que no tengan información de laboratorio
+# Para ello cojo todas las columnas del subconjunto bio menos codigo
+cols_bio <- df_bio %>%
+  colnames() %>%
+  .[!. %in% c("codigo")]
+
+# Uso dropNA de tidyr
+df <- df %>%
+    # Elimino la fila completa si encuentro un NA de alguna de las columnas
+    drop_na(all_of(cols_bio))
+
+# Hago un descriptivo básico usando skimr
+skimr::skim(df)
+
+# Analizando brevemente con skim se observaron valores anómalos que pueden tratarse
+# de erratas. Estas variables son ldl, colesterol_total y hemoglobina, que tienen
+# valores atípicos extremadamente altos.
+
+# Cambio estos valores a NA
+df <- df %>%
+  mutate(
+    ldl = ifelse(ldl > 300, NA, ldl),
+    colesterol_total = ifelse(colesterol_total > 400, NA, colesterol_total),
+    hemoglobina = ifelse(hemoglobina > 20, NA, hemoglobina)
+  )
+
+
+``` 
+
+### Análisis descriptivo y recodificación de variables categóricas
+
+Con el fin de identificar valores extraños para pasarlos a NA, se realizó un análisis descriptivo básico
+de todas las variables a través de la función `skim()` del paquete `skimr`. Posteriormente, se recodificaron las variables categóricas para que tuvieran las etiquetas de datos apropiadas según el diccionario de datos proporcionado.
+
+```{r}
+
+# Compruebo que se cambiaron correctamente
+df %>%
+    select(ldl, colesterol_total, hemoglobina) %>%
+    skimr::skim()
+
+# Recodifico las variables categóricas para que tengan las etiquetas de datos apropiadas
+# según el diccionario de datos
+df_recodificado <- df %>%
+  mutate(
+    # Variables binarias numéricas (0=No, 1=Sí)
+    across(
+      c(gine_publico, gine_privado, cesarea, biberon, pareja, responde,
+        lactancia_en_embarazo_anterior, clases_de_parto), 
+      ~ factor(.x, levels = c(0, 1), labels = c("No", "Sí"))
+    ),
+    
+    # Variables de Texto Si/No, las paso a factor para limpiar niveles
+    across(
+      c(lactancia_materna, otro_tipo_de_lactancia),
+      ~ factor(.x, levels = c("No", "Si", "Sí"))
+    ),
+    
+    lactancia_materna = fct_recode(lactancia_materna, "Sí" = "Si"), 
+    otro_tipo_de_lactancia = fct_recode(otro_tipo_de_lactancia, "Sí" = "Si"),
+
+    # Variables categóricas nominales (Multiclase)
+    nacional = factor(nacional, 
+                      levels = c(1, 2, 3), 
+                      labels = c("Española", "Extranjera", "Otras/No consta")),
+    
+    profesion = factor(profesion, 
+                       levels = c(1, 2, 3, 4, 5), 
+                       labels = c("Enfermera", "Oficina", "Médico", "Profesora", "Otros")),
+    
+    situacion_laboral_pareja = factor(situacion_laboral_pareja,
+                                      levels = c(1, 2, 3, 4, 5),
+                                      labels = c("Activa", "Parada", "Baja", "Jubilado", "Estudiante")),
+    
+    # Variable Ordinal
+    nivel_de_estudios = factor(nivel_de_estudios,
+                               levels = c(1, 2, 3, 4, 5, 6),
+                               labels = c("Primaria", "Secundaria", "Bachiller", 
+                                          "Grado", "Máster", "Doctorado"),
+                               ordered = TRUE)
+  )
+
+```
+
+### Creación de nuevas variables
+
+Una vez los datos están limpios, el hospital solicita una variable adicional que calcule el colesterol total a partir de los valores de LDL, HDL y triglicéridos, así como una variable que indique el tipo de ginecólogo al que acudió la paciente (público, privado, ambos o ninguno).
+
+```{r}
+
+df_var <- df_recodificado %>%
+  mutate(
+    # Variable colesterol total para el descriptivo, calculado mediante la siguiente formula:
+    # Colesterol Total = Colesterol LDL + Colesterol HDL + (Triglicéridos / 5)
+    colesterol_calculado = ldl + hdl + (trigliceridos / 5),
+
+    # Variable tipo de ginecologo
+    tipo_ginecologo = case_when(
+      gine_publico == "Sí" & gine_privado == "No" ~ "Público",
+      gine_publico == "No" & gine_privado == "Sí" ~ "Privado",
+      gine_publico == "Sí" & gine_privado == "Sí" ~ "Ambos",
+      TRUE ~ "Ninguno"
+    )
+  )
+
+
+```
+
+### Análisis descriptivo y visualizaciones
+
+Para obtener una visión general de las variables en el conjunto de datos limpio, se realizó un análisis descriptivo utilizando la función `skim()`. Además, se crearon visualizaciones para explorar la distribución de los parámetros de laboratorio y la relación entre diferentes variables.
+
+```{r}
+
+df_var %>%
+  # Seleccionamos variables de interés (quitamos IDs, fechas, textos libres)
+  select(-codigo, -fecha_de_nacimiento, -ocupacion_habitual_pareja) %>%
+  skim()
+
+# Un histograma para cada uno de los parámetros del laboratorio
+vars_lab <- c("tension_arterial_media", "glucosa", "hdl", "ldl", 
+            "trigliceridos", "creatinina", "hemoglobina", "colesterol_total")
+
+df_var %>%
+  select(all_of(vars_lab)) %>%
+  pivot_longer(cols = everything(), names_to = "biomarcador", values_to = "valor") %>%
+  ggplot(aes(x = valor)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~biomarcador, scales = "free") + 
+  theme_minimal() +
+  labs(title = "Distribución de parámetros de laboratorio", x = "Valor", y = "Frecuencia")
+
+```
+
+Observando la distribución de estos histogramas se puede apreciar que la mayoría de los parámetros tienen
+una distribución normal, incluyendo variables como la hemoglobina, creatinina, glucosa, HDL y colesterol total, lo que indica que la mayoría de las pacientes tienen valores dentro de los rangos esperados. Sin embargo, hay algunas variables como LDL, triglicéridos y tensión media que presentan una ligera asimetría positiva, lo que sugiere que hay un número significativo de pacientes con niveles elevados de estos parámetros, lo cual podría ser indicativo de un mayor riesgo cardiovascular en esta población.
+
+
+### Cuestiones específicas
+
+```{r}
+
+# ¿Cuál es el porcentaje de cesáreas en la muestra?
+df_var %>%
+  count(cesarea) %>%
+  mutate(porcentaje = n / sum(n) * 100)
+
+# ¿Cuál es la media de edad de las mujeres con cesárea y cuál es la media de edad de las
+# mujeres sin cesárea?
+df_var %>%
+  group_by(cesarea) %>%
+  summarise(
+    media_edad = mean(edad_de_la_madre, na.rm = TRUE),
+    n = n()
+  )
+
+# Un gráfico de cajas para la edad, separado por si la mujer tuvo o no cesárea.
+df_var %>%
+  ggplot(aes(x = cesarea, y = edad_de_la_madre, fill = cesarea)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Edad de la madre según tipo de parto",
+       x = "¿Tuvo Cesárea?",
+       y = "Edad de la Madre") +
+  scale_fill_manual(values = c("No" = "lightblue", "Sí" = "salmon")) +
+  theme(legend.position = "none")
+
+```
+
+Al observar estos boxplot, es razonable pensar que la edad es un factor determinante en la probabilidad
+de tener una cesárea, ya que observando el boxplot de las mujeres que tuvieron cesárea, la mediana es
+ligeramente mayor que la de las mujeres que no la tuvieron. A pesar de esto, ambas cajas se solapan, ya que su rango intercuartílico es similar, por lo que se podría considerar como un factor leve y no determinante.
+```{r}
+# De las mujeres que asistieron a clases de parto, ¿qué porcentaje tuvo cesárea?
+df_var %>%
+  filter(clases_de_parto == "Sí") %>%
+  count(cesarea) %>%
+  mutate(porcentaje = n / sum(n) * 100)
+
+# Un gráfico de dispersión que muestre la relación entre el peso de la madre y la tensión
+# arterial y que incluya la línea de regresión.
+df_var %>%
+  ggplot(aes(x = peso_de_la_madre, y = tension_arterial_media)) +
+  geom_point(alpha = 0.6, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "blue", se = TRUE) +
+  theme_minimal() +
+  labs(title = "Relación entre peso de la madre y tensión arterial media",
+       x = "Peso de la Madre (kg)",
+       y = "Tensión Arterial Media (mmHg)")
+
+```
+
+Observando el gráfico de dispersión, se puede observar una tendencia positiva entre el peso de la madre y
+la tensión arterial media, lo que indica que a medida que aumenta el peso de la madre, también tiende a aumentar su tensión arterial media, por lo cual se podría considerar el peso como un factor de riesgo para la hipertensión durante el embarazo. A pesar de esto, se aprecia una dispersión muy alta, lo que considero
+que indica que hay muchos otros factores que influyen en la tensión arterial que no están siendo considerados.
